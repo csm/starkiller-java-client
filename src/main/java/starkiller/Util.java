@@ -1,5 +1,7 @@
 package starkiller;
 
+import io.lacuna.bifurcan.IList;
+import io.lacuna.bifurcan.LinearList;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -11,129 +13,14 @@ import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
 import java.nio.charset.StandardCharsets;
-import java.util.LinkedList;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.Map;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 
 public class Util {
     public static final Logger logger = LoggerFactory.getLogger(Util.class);
-
-    public static DataInput wrap(ByteBuffer buffer) {
-        return new DataInput() {
-            @Override
-            public void readFully(byte[] b) throws IOException {
-                readFully(b, 0, b.length);
-            }
-
-            @Override
-            public void readFully(byte[] b, int off, int len) throws IOException {
-                try {
-                    buffer.get(b, off, len);
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public int skipBytes(int n) {
-                n = Math.min(n, buffer.remaining());
-                buffer.position(buffer.position() + n);
-                return n;
-            }
-
-            @Override
-            public boolean readBoolean() throws IOException {
-                return readByte() == 0;
-            }
-
-            @Override
-            public byte readByte() throws IOException {
-                try {
-                    return buffer.get();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public int readUnsignedByte() throws IOException {
-                return readByte() & 0xFF;
-            }
-
-            @Override
-            public short readShort() throws IOException {
-                try {
-                    return buffer.getShort();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public int readUnsignedShort() throws IOException {
-                return readShort() & 0xFF;
-            }
-
-            @Override
-            public char readChar() throws IOException {
-                return (char) readUnsignedShort();
-            }
-
-            @Override
-            public int readInt() throws IOException {
-                try {
-                    return buffer.getInt();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public long readLong() throws IOException {
-                try {
-                    return buffer.getLong();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public float readFloat() throws IOException {
-                try {
-                    return buffer.getFloat();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public double readDouble() throws IOException {
-                try {
-                    return buffer.getDouble();
-                } catch (BufferUnderflowException bue) {
-                    throw new EOFException();
-                }
-            }
-
-            @Override
-            public String readLine() throws IOException {
-                StringBuilder str = new StringBuilder();
-                int b;
-                while ((b = readUnsignedByte()) != '\n') {
-                    str.append((char) b);
-                }
-                return str.toString();
-            }
-
-            @Override
-            public String readUTF() throws IOException {
-                int len = readUnsignedShort();
-                byte[] b = new byte[len];
-                readFully(b);
-                return new String(b, StandardCharsets.UTF_8);
-            }
-        };
-    }
 
     public static Object hex(ByteBuffer buffer) {
         return new Object() {
@@ -180,6 +67,7 @@ public class Util {
             if (length <= 0x3FFF) {
                 ByteBuffer message = ByteBuffer.allocate(length);
                 return readFully(socket, message).thenApply(rr -> {
+                    message.flip();
                     logger.trace("read message {}", hex(message));
                     return message;
                 });
@@ -210,27 +98,101 @@ public class Util {
         }
     }
 
-    static class AsyncLock {
-        private final AtomicBoolean locked = new AtomicBoolean(false);
-        private final LinkedList<CompletableFuture<Void>> waiters = new LinkedList<>();
+    static class Atom<T> {
+        final AtomicReference<T> reference;
 
-        public synchronized CompletableFuture<Void> lock() {
-            if (locked.compareAndSet(false, true)) {
-                return CompletableFuture.completedFuture(null);
-            } else {
-                CompletableFuture<Void> waiter = new CompletableFuture<>();
-                waiters.add(waiter);
-                return waiter;
+        public Atom(T initial) {
+            reference = new AtomicReference<>(initial);
+        }
+
+        Atom() {
+            this(null);
+        }
+
+        void swap(Function<T, T> applier) {
+            while (true) {
+                T current = reference.get();
+                T next = applier.apply(current);
+                if (reference.compareAndSet(current, next)) {
+                    break;
+                }
             }
         }
 
-        public synchronized void unlock() {
-            if (waiters.isEmpty()) {
-                locked.set(false);
+        T deref() {
+            return reference.get();
+        }
+    }
+
+    static class AsyncLock {
+        private final String name;
+        private final AtomicInteger idgen = new AtomicInteger();
+        private final AtomicReference<String> locked = new AtomicReference<>();
+        private final Atom<IList<Waiter>> waiters = new Atom<>(LinearList.of());
+
+        public AsyncLock(String name) {
+            this.name = name;
+        }
+
+        public AsyncLock() {
+            this(null);
+        }
+
+        class Locked {
+            final String id = String.format("%s-%d", name != null ? name : "lock", idgen.incrementAndGet());
+
+            void unlock() {
+                if (locked.compareAndSet(id, null)) {
+                    AtomicReference<Waiter> selected = new AtomicReference<>();
+                    waiters.swap(l -> {
+                        if (l.size() > 0) {
+                            Waiter head = l.first();
+                            selected.set(head);
+                            return l.removeFirst();
+                        } else {
+                            return l;
+                        }
+                    });
+                    if (selected.get() != null) {
+                        if (locked.compareAndSet(null, selected.get().locked.id)) {
+                            selected.get().complete();
+                        } else {
+                            waiters.swap(l -> l.addFirst(selected.get()));
+                        }
+                    }
+                }
+            }
+        }
+
+        class Waiter {
+            final Locked locked;
+            final CompletableFuture<Locked> future;
+
+            public Waiter(Locked locked, CompletableFuture<Locked> future) {
+                this.locked = locked;
+                this.future = future;
+            }
+
+            void complete() {
+                future.complete(locked);
+            }
+        }
+
+        public CompletableFuture<Locked> lock() {
+            logger.trace("locking {} {}", this, this.name);
+            Locked l = new Locked();
+            if (locked.compareAndSet(null, l.id)) {
+                logger.trace("locked {}", this);
+                return CompletableFuture.completedFuture(l);
             } else {
-                CompletableFuture<Void> waiter = waiters.removeFirst();
-                waiter.complete(null);
+                logger.trace("waiting for lock {}", this);
+                Waiter waiter = new Waiter(l, new CompletableFuture<>());
+                logger.trace("waiting for lock {} with {}", this, waiter);
+                waiters.swap(w -> w.addLast(waiter));
+                waiter.future.whenComplete((res, exc) -> logger.trace("waiter {} completed with res:{}, exc:{}", waiter, res, exc));
+                return waiter.future;
             }
         }
     }
+
 }

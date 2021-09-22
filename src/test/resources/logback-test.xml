@@ -11,6 +11,6 @@
         <appender-ref ref="STDOUT"/>
     </root>
 
-    <logger name="starkiller.core" level="INFO"/>
+    <logger name="starkiller.core" level="TRACE"/>
     <logger name="starkiller.server" level="DEBUG"/>
 </configuration>

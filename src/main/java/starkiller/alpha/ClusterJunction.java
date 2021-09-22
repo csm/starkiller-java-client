@@ -76,7 +76,7 @@ public class ClusterJunction<K, V> implements Junction<K, V> {
                         socket.connect(n.address, null, new CompletionHandler<>() {
                             @Override
                             public void completed(Void result, Object attachment) {
-                                RemoteJunction<K, V> junct = new RemoteJunction<>(socket, n -> {
+                                RemoteJunction<K, V> junct = new RemoteJunction<>(null, null, n -> {
                                 });
                                 junct.tokens().whenComplete((tokens, ex) -> {
                                     if (ex != null) {

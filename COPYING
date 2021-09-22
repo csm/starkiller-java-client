@@ -25,3 +25,9 @@ not derived from or based on this library. If you modify this library,
 you may extend this exception to your version of the library, but you
 are not obliged to do so. If you do not wish to do so, delete this
 exception statement from your version.
+
+In addition, parts of this library are derivative works of Clojure's
+core.async library (the file src/java/starkiller/Timer.java). This
+file is therefore licensed under the Eclipse Public License, the
+license of Clojure. A copy of this license is included in the file
+LICENSE.epl.

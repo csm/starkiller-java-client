@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.util.ByteBufferBackedInputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -12,13 +14,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-public class MsgPack<K, V> {
+class MsgPack<K, V> {
+    private final Class<? extends V> valueClass;
     private final ObjectMapper objectMapper;
-    private final TypeReference<K> keyRef = new TypeReference<>() {};
-    private final TypeReference<V> valRef = new TypeReference<>() {};
+    private static final Logger logger = LoggerFactory.getLogger(MsgPack.class);
 
-    public MsgPack(ObjectMapper objectMapper) {
+    MsgPack(ObjectMapper objectMapper, Class<? extends V> valueClass)
+    {
         this.objectMapper = objectMapper;
+        this.valueClass = valueClass;
     }
 
     private String unpackString(ByteBuffer buffer) throws IOException {
@@ -90,7 +94,7 @@ public class MsgPack<K, V> {
         return arrayLength;
     }
 
-    public RemoteJunction.Response<V> unpackResponse(ByteBuffer buffer) throws IOException {
+    RemoteJunction.Response<V> unpackResponse(ByteBuffer buffer) throws IOException {
         int arrayLength = unpackArrayStart(buffer);
         if (arrayLength != 3) {
             throw new IOException(String.format("invalid response array length: %d", arrayLength));
@@ -104,7 +108,7 @@ public class MsgPack<K, V> {
                     buffer.position(buffer.position() + 3);
                     return new RemoteJunction.TimeoutResponse<>(messageId);
                 } else {
-                    V value = objectMapper.readValue(new ByteBufferBackedInputStream(buffer), valRef);
+                    V value = objectMapper.readValue(new ByteBufferBackedInputStream(buffer), valueClass);
                     return new RemoteJunction.RecvResponse<>(messageId, value);
                 }
             }
@@ -130,7 +134,7 @@ public class MsgPack<K, V> {
         }
     }
 
-    public <K, V> byte[] packRequest(RemoteJunction.Request<K, V> request) throws IOException {
+    byte[] packRequest(RemoteJunction.Request<K, V> request) throws IOException {
         ByteArrayOutputStream bout = new ByteArrayOutputStream();
         if (request instanceof RemoteJunction.SendRequest) {
             RemoteJunction.SendRequest<K, V> sr = (RemoteJunction.SendRequest<K, V>) request;
